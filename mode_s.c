@@ -1194,7 +1194,7 @@ void decodeModesMessage(struct modesMessage *mm, unsigned char *msg) {
             }
 
         } else if (metype == 24) { // Reserved for Surface System Status
-	    printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
+            printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
 
         } else if (metype == 28) { // Extended Squitter Aircraft Status
 			if (mesub == 1) {      // Emergency status squawk field
@@ -1206,13 +1206,13 @@ void decodeModesMessage(struct modesMessage *mm, unsigned char *msg) {
             }
 
         } else if (metype == 29) { // Aircraft Trajectory Intent
-	    printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
+            printf("unhandled DF %d metype %d, mesub %d\n", mm->msgtype, metype, mesub);
         } else if (metype == 30) { // Aircraft Operational Coordination
-	    printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
+            printf("unhandled DF %d metype %d, mesub %d\n", mm->msgtype, metype, mesub);
         } else if (metype == 31) { // Aircraft Operational Status
-	    printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
+            printf("unhandled DF %d metype %d, mesub %d\n", mm->msgtype, metype, mesub);
         } else { // Other metypes
-	    printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
+            printf("unhandled DF %d metype %d\n", mm->msgtype, metype);
         }
     }
 
