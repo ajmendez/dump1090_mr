@@ -1140,8 +1140,6 @@ void showFlightsFATSV(void) {
         if (groundValid) {
             if (ground) {
                 p += sprintf(p, "\tairGround\tG");
-            } else {
-                p += sprintf(p, "\tairGround\tA");
             }
         }
 
@@ -1153,6 +1151,13 @@ void showFlightsFATSV(void) {
         if (a->bFlags & MODES_ACFLAGS_HEADING_VALID) {
             p += sprintf(p, "\theading\t%d", a->track);
             useful = 1;
+        }
+
+        if (a->signalLevel != 255) {
+            unsigned char * pSig       = a->signalLevel;
+            unsigned int signalAverage = (pSig[0] + pSig[1] + pSig[2] + pSig[3] + pSig[4] + pSig[5] + pSig[6] + pSig[7] + 3) >> 3;
+
+            p += sprintf(p, "\tstrength\t%d/%d", a->signalLevel[a->messages & 7], signalAverage);
         }
 
         // if we didn't get at least an alt or a speed or a latlon or
