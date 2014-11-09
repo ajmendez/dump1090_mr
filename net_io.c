@@ -1153,7 +1153,7 @@ void showFlightsFATSV(void) {
             useful = 1;
         }
 
-        if (a->signalLevel != 255) {
+        if (a->signalLevel[a->messages & 7] != 255) {
             unsigned char * pSig       = a->signalLevel;
             unsigned int signalAverage = (pSig[0] + pSig[1] + pSig[2] + pSig[3] + pSig[4] + pSig[5] + pSig[6] + pSig[7] + 3) >> 3;
 
