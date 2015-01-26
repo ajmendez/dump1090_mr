@@ -300,6 +300,7 @@ struct {                             // Internal state
     int   raw;                       // Raw output format
     int   beast;                     // Beast binary format output
     int   mode_ac;                   // Enable decoding of SSR Modes A & C
+    int   bladeRF;                   // Enable bladeRF devices
     int   debug;                     // Debugging mode
     int   net;                       // Enable networking
     int   net_only;                  // Enable just networking

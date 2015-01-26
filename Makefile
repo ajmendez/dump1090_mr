@@ -17,7 +17,7 @@ endif
 
 #CFLAGS=-O2 -g -Wall -W `pkg-config --cflags librtlsdr`
 CFLAGS+= `pkg-config --cflags librtlsdr`
-LIBS=`pkg-config --libs librtlsdr` -lpthread -lm
+LIBS=`pkg-config --libs librtlsdr` `pkg-config --libs libbladeRF` -lpthread -lm
 CC=gcc
 
 

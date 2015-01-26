@@ -29,6 +29,7 @@
 //
 #include "coaa.h"
 #include "dump1090.h"
+#include "libbladeRF.h"
 //
 // ============================= Utility functions ==========================
 //
@@ -347,6 +348,47 @@ void readDataFromFile(void) {
         pthread_cond_signal(&Modes.data_cond);
     }
 }
+
+//
+//=========================================================================
+//
+// Read data from bladeRF
+//
+void bladdRFCallback(unsigned char *buf, uint32_t len, void *ctx) {
+
+    MODES_NOTUSED(ctx);
+
+    // Lock the data buffer variables before accessing them
+    pthread_mutex_lock(&Modes.data_mutex);
+
+    Modes.iDataIn &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase!!!
+
+    // Get the system time for this block
+    ftime(&Modes.stSystemTimeRTL[Modes.iDataIn]);
+
+    if (len > MODES_ASYNC_BUF_SIZE) {len = MODES_ASYNC_BUF_SIZE;}
+
+    // Queue the new data
+    Modes.pData[Modes.iDataIn] = (uint16_t *) buf;
+    Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
+    Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);   
+
+    if (Modes.iDataReady == 0) {
+      // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
+      // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
+      // buffer, but we havent yet processed it, so we're going to lose it. There
+      // isn't much we can do to recover the lost data, but we can correct things to
+      // avoid any additional problems.
+      Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
+      Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);   
+      Modes.iDataLost++;
+    }
+ 
+    // Signal to the other thread that new data is ready, and unlock
+    pthread_cond_signal(&Modes.data_cond);
+    pthread_mutex_unlock(&Modes.data_mutex);
+}
+
 //
 //=========================================================================
 //
@@ -356,7 +398,10 @@ void readDataFromFile(void) {
 void *readerThreadEntryPoint(void *arg) {
     MODES_NOTUSED(arg);
 
-    if (Modes.filename == NULL) {
+    if (Modes.bladeRF == 1) {
+		//bladeRF_read_async(void); 
+	
+	} else if (Modes.filename == NULL) {
         rtlsdr_read_async(Modes.dev, rtlsdrCallback, NULL,
                               MODES_ASYNC_BUF_NUMBER,
                               MODES_ASYNC_BUF_SIZE);
@@ -394,6 +439,390 @@ void snipMode(int level) {
     }
 }
 //
+//================================ BladeRF ==================================
+//
+// Initialize bladeRF
+//
+#define DEFAULT_SAMPLERATE      2000000
+#define DEFAULT_FREQUENCY       1090 * 1000000
+#define DEFAULT_STREAM_XFERS    16
+#define DEFAULT_STREAM_BUFFERS  32
+#define DEFAULT_BANDWIDTH		1500000
+#define DEFAULT_STREAM_SAMPLES  32768
+#define DEFAULT_STREAM_TIMEOUT  10000
+#define SYNC_TIMEOUT_MS         10000
+
+static bool shutdown_stream = false;
+pthread_mutex_t g_dev_lock;
+struct  bladerf *g_dev;
+
+struct adsb_data
+{
+    void                **buffers;      /* Transmit buffers */
+    size_t              num_buffers;    /* Number of buffers */
+    size_t              samples_per_buffer; /* Number of samples per buffer */
+    unsigned int        idx;            /* The next one that needs to go out */
+    bladerf_module      module;         /* Direction */
+    ssize_t             samples_left;   /* Number of samples left */
+};
+
+static struct adsb_args {
+    struct bladerf *dev;
+    pthread_mutex_t *dev_lock;
+
+    struct adsb_params *p;
+    pthread_t thread;
+    int status;
+    bool quit;
+} rx_args, tx_args;
+
+struct adsb_params {
+    const char      *device_str;
+    unsigned int    samplerate;
+    unsigned int    frequency;
+    bladerf_loopback loopback;
+    
+    const char		*fpga_image;
+    const char		*fx3_image;
+    
+    unsigned int 	tx_repetitions;
+    uint64_t 		rx_count;
+    unsigned int 	block_size;
+
+    /* Stream config */
+    unsigned int    num_xfers;
+    unsigned int    stream_buffer_count;
+    unsigned int    stream_buffer_size;    /* Units of samples */
+    unsigned int 	timeout_ms;
+    unsigned int    gain;
+    unsigned int    bandwidth;
+
+};
+
+static int init_module(struct bladerf *dev, struct adsb_params *p, bladerf_module m)
+{
+	const char *m_str = "RX";
+	int status;
+	unsigned int samplerate_actual;
+	unsigned int frequency_actual;
+	unsigned int bw_actual;
+	
+	status = bladerf_set_sample_rate(dev, m, p->samplerate, &samplerate_actual);
+	if (status != 0) {
+		printf("Failed to set %s samplerate: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+	
+	status = bladerf_set_frequency(dev, m, p->frequency);
+	if (status != 0) {
+		printf("Failed to set %s frequency: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+
+	status = bladerf_get_frequency(dev, m, &frequency_actual);
+	if (status != 0) {
+		printf("Failed to read back %s frequency: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+
+    status = bladerf_set_lna_gain(dev, BLADERF_LNA_GAIN_MAX);
+    status = bladerf_set_lpf_mode(dev, m, BLADERF_LPF_NORMAL);
+    status = bladerf_set_bandwidth(dev, m, p->bandwidth, &bw_actual);
+    bladerf_set_txvga1(dev, -35);
+    bladerf_set_txvga2(dev, 0);
+    bladerf_set_rxvga1(dev, p->gain);
+    bladerf_set_rxvga2(dev, p->gain); // It turns out that we get more messages with this set high
+    printf("%s Frequency = %u, %s Samplerate = %u actual bw=%u\n", m_str, frequency_actual, m_str, samplerate_actual, bw_actual);
+    return status;
+}
+
+//---------------------------------------------------------------
+static struct bladerf * initialize_device(struct adsb_params *p)
+{
+	struct bladerf *dev;
+	int fpga_loaded;
+
+	int status = bladerf_open(&dev, p->device_str);
+	if (status != 0) {
+		printf("Failed to open : %s\n", bladerf_strerror(status));
+		return NULL;
+	}
+
+#if 0
+	fpga_loaded = bladerf_is_fpga_configured(dev);
+	if (fpga_loaded < 0) {
+		printf("Failed to check FPGA state: %s\n",bladerf_strerror(fpga_loaded));
+		status = -1;
+		goto initialize_device_out;
+	} else if (fpga_loaded == 0) {
+		printf("Loading fpga...\n");
+        status = bladerf_load_fpga(dev, p->fpga_image);
+        if (status) {
+        	fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
+        	goto initialize_device_out;
+        } else {
+                printf("Done loading image %s.\n", p->fpga_image);
+        }
+	}
+#else
+	printf("Loading fpga...\n");
+        status = bladerf_load_fpga(dev, p->fpga_image);
+        if (status) {
+        	fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
+        	goto initialize_device_out;
+        } else {
+                printf("Done loading image %s.\n", p->fpga_image);
+        }
+#endif
+
+	status = init_module(dev, p, BLADERF_MODULE_RX);
+    if (status != 0) {
+    	printf("Failed to init RX module: %s\n",bladerf_strerror(status));
+        goto initialize_device_out;
+    }
+        
+	status = bladerf_set_loopback(dev, p->loopback);
+	if (status != 0) {
+		printf("Failed to set loopback mode: %s\n",
+		bladerf_strerror(status));
+	} else {
+		printf("Set loopback to %d\n", p->loopback);
+	}
+
+	initialize_device_out:
+	if (status != 0) {
+		bladerf_close(dev);
+		dev = NULL;
+	}
+	return dev;
+}
+
+static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
+{
+	struct bladerf_lms_dc_cals lms_cals = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+    int status;
+    int dcoff_i, dcoff_q;
+    
+    //Set calibration    
+    lms_cals.lpf_tuning = atoi(argv[1]);
+    lms_cals.tx_lpf_i	= atoi(argv[2]);
+    lms_cals.tx_lpf_q	= atoi(argv[3]);
+    lms_cals.rx_lpf_i	= atoi(argv[4]);
+    lms_cals.rx_lpf_q	= atoi(argv[5]);
+    lms_cals.dc_ref	= atoi(argv[6]);
+    lms_cals.rxvga2a_i	= atoi(argv[7]);
+    lms_cals.rxvga2a_q	= atoi(argv[8]);
+    lms_cals.rxvga2b_i	= atoi(argv[9]);
+    lms_cals.rxvga2b_q	= atoi(argv[10]);
+        
+    status = bladerf_lms_set_dc_cals(dev, &lms_cals);
+        if (status != 0) {
+        return -1;
+    }
+    
+    //Print out calibration
+    status = bladerf_lms_get_dc_cals(dev, &lms_cals);
+    if (status != 0) {
+    	return -1;
+    } else {
+                printf("    LPF tuning module: %d\n\n", lms_cals.lpf_tuning);
+                printf("    TX LPF I filter: %d\n", lms_cals.tx_lpf_i);
+                printf("    TX LPF Q filter: %d\n\n", lms_cals.tx_lpf_q);
+                printf("    RX LPF I filter: %d\n", lms_cals.rx_lpf_i);
+                printf("    RX LPF Q filter: %d\n\n", lms_cals.rx_lpf_q);
+                printf("    RX VGA2 DC reference module: %d\n", lms_cals.dc_ref);
+                printf("    RX VGA2 stage 1, I channel: %d\n", lms_cals.rxvga2a_i);
+                printf("    RX VGA2 stage 1, Q channel: %d\n", lms_cals.rxvga2a_q);
+                printf("    RX VGA2 stage 2, I channel: %d\n", lms_cals.rxvga2b_i);
+                printf("    RX VGA2 stage 2, Q channel: %d\n\n", lms_cals.rxvga2b_q);
+    }
+    
+    
+    //DC calibration
+    dcoff_i = atoi(argv[11]);
+    dcoff_q = atoi(argv[12]);
+    bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, dcoff_i);
+	bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, dcoff_q);
+        
+    return 0;
+	
+}
+
+void gen_avr_message (unsigned char *message) {
+    int i;
+    int len;
+    static char priorMessage[14] = { 0 };
+
+    if (message[0] & 0x80) {
+	len = 14;
+    } else {
+	len = 7;
+    }
+
+    if (memcmp (message, priorMessage, len) == 0) {
+	return;
+    }
+
+    printf("*");
+    for (i = 0; i < len; i++) {
+	printf("%02x", message[i]);
+    }
+    printf(";\n");
+
+    memcpy (priorMessage, message, len);
+}
+
+void gen_avr(int16_t *messages, int nMessages)
+{
+    int i;
+
+    for (i = 0; i < nMessages; i++) {
+	gen_avr_message ((unsigned char *)messages);
+	messages += 16;
+    }
+}
+
+void *adsb_task(void *args)
+{
+	int status;
+	int16_t *samples; // buffer containing the 16 bit signed samples
+	unsigned char *samples_8bit; // buffer to contain the converted 8 bit unsigned samples
+	unsigned int to_rx;
+
+	struct adsb_args *task = (struct adsb_args*) args;
+	struct adsb_params *p = task->p;
+	bool done = false;
+	size_t n;
+	int i;
+	
+	FILE * fp;
+    fp = fopen ("output.bin", "w");
+    
+	samples = (int16_t *)malloc(p->stream_buffer_size);
+	samples_8bit = (unsigned char *)malloc(p->stream_buffer_size/2);
+	if (samples == NULL) {
+		perror("malloc");
+	return NULL;
+	}
+	
+	status = bladerf_sync_config(task->dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, p->stream_buffer_count, p->stream_buffer_size, p->num_xfers, p->timeout_ms);
+	if (status != 0) {
+		printf("Failed to initialize RX sync handle: %s\n",
+		bladerf_strerror(status));
+	goto rx_task_out;
+	}
+	
+	pthread_mutex_lock(task->dev_lock);
+	status = bladerf_enable_module(task->dev, BLADERF_MODULE_RX, true);
+	pthread_mutex_unlock(task->dev_lock);
+	if (status != 0) {
+		printf("Failed to enable RX module: %s\n", bladerf_strerror(status));
+	goto rx_task_out;
+	}
+	
+	/* This assumption is made with the below cast */
+	//assert(p->block_size < UINT_MAX);
+
+
+	// Have to set stream timeout because sync_timeouts are not working
+	bladerf_set_stream_timeout(task->dev, BLADERF_MODULE_RX, 0);	
+	
+        int k;
+        int16_t *pointer16; // used to iterate over 16 bit sample buffer
+        unsigned char *pointer8;   // used to iterate over 8 bit sample buffer
+	while (!done && !task->quit) {
+		status = bladerf_sync_rx(task->dev, samples, p->block_size, NULL, SYNC_TIMEOUT_MS);
+		if (status != 0) {
+			printf("RX failed: %s\n", bladerf_strerror(status));
+			done = true;
+		} else {
+			int16_t *pointer16 = samples;
+			unsigned char *pointer8 = samples_8bit;
+			for (k = 0; k < 2 * p->block_size; k++) {
+	                        *pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
+			}
+			//write(1, samples_8bit, 2*p->block_size);
+		}
+	}	
+
+	rx_task_out:
+	free(samples);
+	pthread_mutex_lock(task->dev_lock);
+	status = bladerf_enable_module(task->dev, BLADERF_MODULE_RX, false);
+	pthread_mutex_unlock(task->dev_lock);		
+	if (status != 0) {
+		printf("Failed to disable RX module: %s\n", bladerf_strerror(status));
+	}
+	
+	fclose(fp);
+	
+	return NULL;
+}
+
+int modesInitBLADERF(void) {	
+
+	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_VERBOSE); 	
+	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_DEBUG);
+	
+	int status;
+	struct adsb_params p;
+	struct adsb_args rx_args;
+	struct bladerf *dev;
+	/* We must be sure to only make control calls
+	* (e.g., bladerf_enable_module()) from a single context. This is done
+	* by locking access to dev in such cases.
+	*
+	* We do not need to be holding the lock when making calls to
+	* bladerf_sync_rx/tx, since we're only calling each of these functions from
+	* a single context (as opposed to two threads both calling sync_rx).
+	*/
+	pthread_mutex_t dev_lock;
+	
+	if (pthread_mutex_init(&dev_lock, NULL) != 0) {
+		return 0;
+	}
+	
+	p.frequency = DEFAULT_FREQUENCY;
+    p.samplerate = DEFAULT_SAMPLERATE;
+    p.rx_count = 0; // 0 is infinte samples
+    p.block_size = 32768; // block_size is number of samples.
+    p.device_str = NULL;
+    p.stream_buffer_size = p.block_size*2*2; // block_size number of samples * 2 bytes per sample * 2 (for both I and Q)
+    p.stream_buffer_count = 32;
+    p.num_xfers = 16;
+    p.timeout_ms = SYNC_TIMEOUT_MS;
+    p.gain = 30;
+    p.bandwidth = 3 * 1000000;
+    p.loopback = BLADERF_LB_NONE;
+    p.fpga_image = "hosted_calibrate.rbf";
+    p.fx3_image = "bladeRF_fw.img";
+	dev = initialize_device(&p);
+	if (dev == NULL) {
+		return 0;
+	}
+	
+	//LMS receiver calibration
+	//status = cal_lms_adsb(dev, argc, argv);
+		
+	rx_args.dev = dev;
+	rx_args.dev_lock = &dev_lock;
+	rx_args.p = &p;
+	rx_args.status = 0;
+	rx_args.quit = false;
+	printf("Starting RX task\n");
+	}
+
+	printf("Running...\n");
+	
+	pthread_join(rx_args.thread, NULL);
+    printf("Joined  RX task\n");
+	
+	bladerf_close(dev);
+	return 0;
+	 
+};
+
+//
 // ================================ Main ====================================
 //
 void showHelp(void) {
@@ -416,6 +845,7 @@ void showHelp(void) {
 "--net-beast              TCP raw output in Beast binary format\n"
 "--net-only               Enable just networking, no RTL device or file used\n"
 "--no-rtlsdr-ok           Keep going even if no RTLSDR device is found\n"
+"--bladeRF                Enable bladeRF\n"
 "--net-fatsv-port <port>  FlightAware TSV output port (default: 10001)\n"
 "--net-http-port <port>   HTTP server port (default: 8080)\n"
 "--net-ri-port <port>     TCP raw input listen port  (default: 30001)\n"
@@ -710,6 +1140,8 @@ int main(int argc, char **argv) {
             Modes.net_only = 1;
         } else if (!strcmp(argv[j],"--no-rtlsdr-ok")) {
             Modes.no_rtlsdr_ok = 1;
+	    } else if (!strcmp(argv[j],"--bladeRF")) {
+			Modes.bladeRF = 1;
        } else if (!strcmp(argv[j],"--net-heartbeat") && more) {
             Modes.net_heartbeat_rate = atoi(argv[++j]) * 15;
        } else if (!strcmp(argv[j],"--net-ro-size") && more) {
@@ -807,12 +1239,22 @@ int main(int argc, char **argv) {
     if (Modes.interactive) {signal(SIGWINCH, sigWinchCallback);}
 #endif
 
-    // Initialization
-    modesInit();
+    // Check if user wants to run bladeRF
+	if (Modes.bladeRF){
+		if (!modesInitBLADERF()) {
+			//no bladeRF found or failed initalizing
+			fprintf(stderr,"BladeRF not initialized.\n");
+			exit(1);
+		}
+		
+	}
+
+	// Initialization
+	modesInit();
 
     if (Modes.net_only) {
         fprintf(stderr,"Net-only mode, no RTL device or file open.\n");
-    } else if (Modes.filename == NULL) {
+	} else if (Modes.filename == NULL) {
         if (!modesInitRTLSDR()) {
             // no RTLSDR found and --no-rtlsdr-ok specified, proceed net-only
             Modes.net_only = 1;
@@ -842,7 +1284,7 @@ int main(int argc, char **argv) {
     }
 
     // Create the thread that will read the data from the device.
-    pthread_create(&Modes.reader_thread, NULL, readerThreadEntryPoint, NULL);
+	pthread_create(&Modes.reader_thread, NULL, readerThreadEntryPoint, NULL);
     pthread_mutex_lock(&Modes.data_mutex);
 
     while (Modes.exit == 0) {
