@@ -352,46 +352,6 @@ void readDataFromFile(void) {
 //
 //=========================================================================
 //
-// Read data from bladeRF
-//
-void bladeRFCallback(unsigned char *buf, uint32_t len, void *ctx) {
-
-    MODES_NOTUSED(ctx);
-
-    // Lock the data buffer variables before accessing them
-    pthread_mutex_lock(&Modes.data_mutex);
-
-    Modes.iDataIn &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase!!!
-
-    // Get the system time for this block
-    ftime(&Modes.stSystemTimeRTL[Modes.iDataIn]);
-
-    if (len > MODES_ASYNC_BUF_SIZE) {len = MODES_ASYNC_BUF_SIZE;}
-
-    // Queue the new data
-    Modes.pData[Modes.iDataIn] = (uint16_t *) buf;
-    Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
-    Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);   
-
-    if (Modes.iDataReady == 0) {
-      // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
-      // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
-      // buffer, but we havent yet processed it, so we're going to lose it. There
-      // isn't much we can do to recover the lost data, but we can correct things to
-      // avoid any additional problems.
-      Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
-      Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);   
-      Modes.iDataLost++;
-    }
- 
-    // Signal to the other thread that new data is ready, and unlock
-    pthread_cond_signal(&Modes.data_cond);
-    pthread_mutex_unlock(&Modes.data_mutex);
-}
-
-//
-//=========================================================================
-//
 // We read data using a thread, so the main thread only handles decoding
 // without caring about data acquisition
 //
@@ -399,9 +359,7 @@ void *readerThreadEntryPoint(void *arg) {
     MODES_NOTUSED(arg);
 
     if (Modes.bladeRF == 1) {
-		printf("getting samples\n");		
-		//bladeRF_read_async(void); 
-	
+		Modes.status = bladerfReadAsync(); 
 	} else if (Modes.filename == NULL) {
         rtlsdr_read_async(Modes.dev, rtlsdrCallback, NULL,
                               MODES_ASYNC_BUF_NUMBER,
@@ -504,55 +462,49 @@ static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
 	
 }
 
-void *adsb_task(void *args)
-{
+int bladerfReadAsync(void) {
+	
+	pthread_mutex_lock(&Modes.data_mutex);
+
 	int status;
 	int16_t *samples; // buffer containing the 16 bit signed samples
 	unsigned char *samples_8bit; // buffer to contain the converted 8 bit unsigned samples
 	unsigned int to_rx;
 
-	//struct adsb_args *task = (struct adsb_args*) args;
-	//struct adsb_params *p = task->p;
 	bool done = false;
 	size_t n;
 	int i;
 	
-	FILE * fp;
-    fp = fopen ("output.bin", "w");
-    
 	samples = (int16_t *)malloc(Modes.stream_buffer_size);
 	samples_8bit = (unsigned char *)malloc(Modes.stream_buffer_size/2);
 	if (samples == NULL) {
 		perror("malloc");
-	return NULL;
+	return 0;
 	}
-	
+
 	status = bladerf_sync_config(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, Modes.stream_buffer_count, Modes.stream_buffer_size, Modes.num_xfers, Modes.timeout_ms);
 	if (status != 0) {
-		printf("Failed to initialize RX sync handle: %s\n",
-		bladerf_strerror(status));
+		printf("Failed to initialize RX sync handle: %s\n", bladerf_strerror(status));
 	goto rx_task_out;
 	}
 	
-	pthread_mutex_lock(Modes.dev_lock);
+	//pthread_mutex_lock(Modes.dev_lock);
 	status = bladerf_enable_module(Modes.bladerf_dev, BLADERF_MODULE_RX, true);
-	pthread_mutex_unlock(Modes.dev_lock);
+	//pthread_mutex_unlock(Modes.dev_lock);
 	if (status != 0) {
 		printf("Failed to enable RX module: %s\n", bladerf_strerror(status));
 	goto rx_task_out;
 	}
-	
-	/* This assumption is made with the below cast */
+	// This assumption is made with the below cast 
 	//assert(p->block_size < UINT_MAX);
-
-
 	// Have to set stream timeout because sync_timeouts are not working
 	bladerf_set_stream_timeout(Modes.bladerf_dev, BLADERF_MODULE_RX, 0);	
 	
         int k;
         int16_t *pointer16; // used to iterate over 16 bit sample buffer
         unsigned char *pointer8;   // used to iterate over 8 bit sample buffer
-	while (!done && Modes.quit) {
+	while (Modes.exit == 0) {
+	printf("grabbing one buffer\n");
 		status = bladerf_sync_rx(Modes.bladerf_dev, samples, Modes.block_size, NULL, SYNC_TIMEOUT_MS);
 		if (status != 0) {
 			printf("RX failed: %s\n", bladerf_strerror(status));
@@ -563,28 +515,28 @@ void *adsb_task(void *args)
 			for (k = 0; k < 2 * Modes.block_size; k++) {
 	                        *pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
 			}
-			//write(1, samples_8bit, 2*p->block_size);
+			//write(1, samples_8bit, 2*Modes.block_size);
+			puts(samples_8bit);
 		}
 	}	
 
 	rx_task_out:
 	free(samples);
-	pthread_mutex_lock(Modes.dev_lock);
+	//pthread_mutex_lock(Modes.dev_lock);
 	status = bladerf_enable_module(Modes.bladerf_dev, BLADERF_MODULE_RX, false);
-	pthread_mutex_unlock(Modes.dev_lock);		
+	//pthread_mutex_unlock(Modes.dev_lock);		
 	if (status != 0) {
 		printf("Failed to disable RX module: %s\n", bladerf_strerror(status));
 	}
 	
-	fclose(fp);
-	
-	return NULL;
+	return 1;
+
 }
 
 int modesInitBLADERF(void) {	
 
 	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_VERBOSE); 	
-	bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_DEBUG);
+	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_DEBUG);
 	
 	/* We must be sure to only make control calls
 	* (e.g., bladerf_enable_module()) from a single context. This is done
@@ -594,11 +546,6 @@ int modesInitBLADERF(void) {
 	* bladerf_sync_rx/tx, since we're only calling each of these functions from
 	* a single context (as opposed to two threads both calling sync_rx).
 	*/
-	pthread_mutex_t dev_lock;
-	
-	if (pthread_mutex_init(&dev_lock, NULL) != 0) {
-		return 0;
-	}
 	
 	Modes.frequency = DEFAULT_FREQUENCY;
     Modes.samplerate = DEFAULT_SAMPLERATE;
@@ -698,26 +645,13 @@ int modesInitBLADERF(void) {
 		bladerf_close(Modes.bladerf_dev);
 		return 0;
 	}
-	return 1;	
 	
 	//LMS receiver calibration
 	//status = cal_lms_adsb(Modes.bladerfdev, argc, argv);
 		
-	//rx_args.dev = dev;
-	//rx_args.dev_lock = &dev_lock;
-	//rx_args.p = &p;
-	//rx_args.status = 0;
-	//rx_args.quit = false;
-	//printf("Starting RX task\n");
+	printf("BladeRF Intialized\n");
 	
-
-	printf("Running...\n");
-	
-	//pthread_join(rx_args.thread, NULL);
-    //printf("Joined  RX task\n");
-	
-	//bladerf_close(dev);
-	return 0;
+	return 1;
 	 
 };
 
@@ -1138,21 +1072,18 @@ int main(int argc, char **argv) {
     if (Modes.interactive) {signal(SIGWINCH, sigWinchCallback);}
 #endif
 
-    // Check if user wants to run bladeRF
-	if (Modes.bladeRF){
-		if (!modesInitBLADERF()) {
-			//no bladeRF found or failed initalizing
-			fprintf(stderr,"BladeRF not initialized.\n");
-			exit(1);
-		}
-		
-	}
 
 	// Initialization
 	modesInit();
 
     if (Modes.net_only) {
         fprintf(stderr,"Net-only mode, no RTL device or file open.\n");
+	} else if (Modes.bladeRF) {
+		if (!modesInitBLADERF()) {
+			//no bladeRF found or failed to initalize
+			fprintf(stderr,"BladeRF not initialized.\n");
+			exit(1);
+		}
 	} else if (Modes.filename == NULL) {
         if (!modesInitRTLSDR()) {
             // no RTLSDR found and --no-rtlsdr-ok specified, proceed net-only
