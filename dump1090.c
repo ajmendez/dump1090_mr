@@ -354,7 +354,7 @@ void readDataFromFile(void) {
 //
 // Read data from bladeRF
 //
-void bladdRFCallback(unsigned char *buf, uint32_t len, void *ctx) {
+void bladeRFCallback(unsigned char *buf, uint32_t len, void *ctx) {
 
     MODES_NOTUSED(ctx);
 
@@ -399,6 +399,7 @@ void *readerThreadEntryPoint(void *arg) {
     MODES_NOTUSED(arg);
 
     if (Modes.bladeRF == 1) {
+		printf("getting samples\n");		
 		//bladeRF_read_async(void); 
 	
 	} else if (Modes.filename == NULL) {
@@ -452,151 +453,6 @@ void snipMode(int level) {
 #define DEFAULT_STREAM_TIMEOUT  10000
 #define SYNC_TIMEOUT_MS         10000
 
-static bool shutdown_stream = false;
-pthread_mutex_t g_dev_lock;
-struct  bladerf *g_dev;
-
-struct adsb_data
-{
-    void                **buffers;      /* Transmit buffers */
-    size_t              num_buffers;    /* Number of buffers */
-    size_t              samples_per_buffer; /* Number of samples per buffer */
-    unsigned int        idx;            /* The next one that needs to go out */
-    bladerf_module      module;         /* Direction */
-    ssize_t             samples_left;   /* Number of samples left */
-};
-
-static struct adsb_args {
-    struct bladerf *dev;
-    pthread_mutex_t *dev_lock;
-
-    struct adsb_params *p;
-    pthread_t thread;
-    int status;
-    bool quit;
-} rx_args, tx_args;
-
-struct adsb_params {
-    const char      *device_str;
-    unsigned int    samplerate;
-    unsigned int    frequency;
-    bladerf_loopback loopback;
-    
-    const char		*fpga_image;
-    const char		*fx3_image;
-    
-    unsigned int 	tx_repetitions;
-    uint64_t 		rx_count;
-    unsigned int 	block_size;
-
-    /* Stream config */
-    unsigned int    num_xfers;
-    unsigned int    stream_buffer_count;
-    unsigned int    stream_buffer_size;    /* Units of samples */
-    unsigned int 	timeout_ms;
-    unsigned int    gain;
-    unsigned int    bandwidth;
-
-};
-
-static int init_module(struct bladerf *dev, struct adsb_params *p, bladerf_module m)
-{
-	const char *m_str = "RX";
-	int status;
-	unsigned int samplerate_actual;
-	unsigned int frequency_actual;
-	unsigned int bw_actual;
-	
-	status = bladerf_set_sample_rate(dev, m, p->samplerate, &samplerate_actual);
-	if (status != 0) {
-		printf("Failed to set %s samplerate: %s\n", m_str, bladerf_strerror(status));
-		return status;
-	}
-	
-	status = bladerf_set_frequency(dev, m, p->frequency);
-	if (status != 0) {
-		printf("Failed to set %s frequency: %s\n", m_str, bladerf_strerror(status));
-		return status;
-	}
-
-	status = bladerf_get_frequency(dev, m, &frequency_actual);
-	if (status != 0) {
-		printf("Failed to read back %s frequency: %s\n", m_str, bladerf_strerror(status));
-		return status;
-	}
-
-    status = bladerf_set_lna_gain(dev, BLADERF_LNA_GAIN_MAX);
-    status = bladerf_set_lpf_mode(dev, m, BLADERF_LPF_NORMAL);
-    status = bladerf_set_bandwidth(dev, m, p->bandwidth, &bw_actual);
-    bladerf_set_txvga1(dev, -35);
-    bladerf_set_txvga2(dev, 0);
-    bladerf_set_rxvga1(dev, p->gain);
-    bladerf_set_rxvga2(dev, p->gain); // It turns out that we get more messages with this set high
-    printf("%s Frequency = %u, %s Samplerate = %u actual bw=%u\n", m_str, frequency_actual, m_str, samplerate_actual, bw_actual);
-    return status;
-}
-
-//---------------------------------------------------------------
-static struct bladerf * initialize_device(struct adsb_params *p)
-{
-	struct bladerf *dev;
-	int fpga_loaded;
-
-	int status = bladerf_open(&dev, p->device_str);
-	if (status != 0) {
-		printf("Failed to open : %s\n", bladerf_strerror(status));
-		return NULL;
-	}
-
-#if 0
-	fpga_loaded = bladerf_is_fpga_configured(dev);
-	if (fpga_loaded < 0) {
-		printf("Failed to check FPGA state: %s\n",bladerf_strerror(fpga_loaded));
-		status = -1;
-		goto initialize_device_out;
-	} else if (fpga_loaded == 0) {
-		printf("Loading fpga...\n");
-        status = bladerf_load_fpga(dev, p->fpga_image);
-        if (status) {
-        	fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
-        	goto initialize_device_out;
-        } else {
-                printf("Done loading image %s.\n", p->fpga_image);
-        }
-	}
-#else
-	printf("Loading fpga...\n");
-        status = bladerf_load_fpga(dev, p->fpga_image);
-        if (status) {
-        	fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
-        	goto initialize_device_out;
-        } else {
-                printf("Done loading image %s.\n", p->fpga_image);
-        }
-#endif
-
-	status = init_module(dev, p, BLADERF_MODULE_RX);
-    if (status != 0) {
-    	printf("Failed to init RX module: %s\n",bladerf_strerror(status));
-        goto initialize_device_out;
-    }
-        
-	status = bladerf_set_loopback(dev, p->loopback);
-	if (status != 0) {
-		printf("Failed to set loopback mode: %s\n",
-		bladerf_strerror(status));
-	} else {
-		printf("Set loopback to %d\n", p->loopback);
-	}
-
-	initialize_device_out:
-	if (status != 0) {
-		bladerf_close(dev);
-		dev = NULL;
-	}
-	return dev;
-}
-
 static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
 {
 	struct bladerf_lms_dc_cals lms_cals = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
@@ -648,40 +504,6 @@ static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
 	
 }
 
-void gen_avr_message (unsigned char *message) {
-    int i;
-    int len;
-    static char priorMessage[14] = { 0 };
-
-    if (message[0] & 0x80) {
-	len = 14;
-    } else {
-	len = 7;
-    }
-
-    if (memcmp (message, priorMessage, len) == 0) {
-	return;
-    }
-
-    printf("*");
-    for (i = 0; i < len; i++) {
-	printf("%02x", message[i]);
-    }
-    printf(";\n");
-
-    memcpy (priorMessage, message, len);
-}
-
-void gen_avr(int16_t *messages, int nMessages)
-{
-    int i;
-
-    for (i = 0; i < nMessages; i++) {
-	gen_avr_message ((unsigned char *)messages);
-	messages += 16;
-    }
-}
-
 void *adsb_task(void *args)
 {
 	int status;
@@ -689,8 +511,8 @@ void *adsb_task(void *args)
 	unsigned char *samples_8bit; // buffer to contain the converted 8 bit unsigned samples
 	unsigned int to_rx;
 
-	struct adsb_args *task = (struct adsb_args*) args;
-	struct adsb_params *p = task->p;
+	//struct adsb_args *task = (struct adsb_args*) args;
+	//struct adsb_params *p = task->p;
 	bool done = false;
 	size_t n;
 	int i;
@@ -698,23 +520,23 @@ void *adsb_task(void *args)
 	FILE * fp;
     fp = fopen ("output.bin", "w");
     
-	samples = (int16_t *)malloc(p->stream_buffer_size);
-	samples_8bit = (unsigned char *)malloc(p->stream_buffer_size/2);
+	samples = (int16_t *)malloc(Modes.stream_buffer_size);
+	samples_8bit = (unsigned char *)malloc(Modes.stream_buffer_size/2);
 	if (samples == NULL) {
 		perror("malloc");
 	return NULL;
 	}
 	
-	status = bladerf_sync_config(task->dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, p->stream_buffer_count, p->stream_buffer_size, p->num_xfers, p->timeout_ms);
+	status = bladerf_sync_config(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, Modes.stream_buffer_count, Modes.stream_buffer_size, Modes.num_xfers, Modes.timeout_ms);
 	if (status != 0) {
 		printf("Failed to initialize RX sync handle: %s\n",
 		bladerf_strerror(status));
 	goto rx_task_out;
 	}
 	
-	pthread_mutex_lock(task->dev_lock);
-	status = bladerf_enable_module(task->dev, BLADERF_MODULE_RX, true);
-	pthread_mutex_unlock(task->dev_lock);
+	pthread_mutex_lock(Modes.dev_lock);
+	status = bladerf_enable_module(Modes.bladerf_dev, BLADERF_MODULE_RX, true);
+	pthread_mutex_unlock(Modes.dev_lock);
 	if (status != 0) {
 		printf("Failed to enable RX module: %s\n", bladerf_strerror(status));
 	goto rx_task_out;
@@ -725,20 +547,20 @@ void *adsb_task(void *args)
 
 
 	// Have to set stream timeout because sync_timeouts are not working
-	bladerf_set_stream_timeout(task->dev, BLADERF_MODULE_RX, 0);	
+	bladerf_set_stream_timeout(Modes.bladerf_dev, BLADERF_MODULE_RX, 0);	
 	
         int k;
         int16_t *pointer16; // used to iterate over 16 bit sample buffer
         unsigned char *pointer8;   // used to iterate over 8 bit sample buffer
-	while (!done && !task->quit) {
-		status = bladerf_sync_rx(task->dev, samples, p->block_size, NULL, SYNC_TIMEOUT_MS);
+	while (!done && Modes.quit) {
+		status = bladerf_sync_rx(Modes.bladerf_dev, samples, Modes.block_size, NULL, SYNC_TIMEOUT_MS);
 		if (status != 0) {
 			printf("RX failed: %s\n", bladerf_strerror(status));
 			done = true;
 		} else {
 			int16_t *pointer16 = samples;
 			unsigned char *pointer8 = samples_8bit;
-			for (k = 0; k < 2 * p->block_size; k++) {
+			for (k = 0; k < 2 * Modes.block_size; k++) {
 	                        *pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
 			}
 			//write(1, samples_8bit, 2*p->block_size);
@@ -747,9 +569,9 @@ void *adsb_task(void *args)
 
 	rx_task_out:
 	free(samples);
-	pthread_mutex_lock(task->dev_lock);
-	status = bladerf_enable_module(task->dev, BLADERF_MODULE_RX, false);
-	pthread_mutex_unlock(task->dev_lock);		
+	pthread_mutex_lock(Modes.dev_lock);
+	status = bladerf_enable_module(Modes.bladerf_dev, BLADERF_MODULE_RX, false);
+	pthread_mutex_unlock(Modes.dev_lock);		
 	if (status != 0) {
 		printf("Failed to disable RX module: %s\n", bladerf_strerror(status));
 	}
@@ -762,12 +584,8 @@ void *adsb_task(void *args)
 int modesInitBLADERF(void) {	
 
 	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_VERBOSE); 	
-	//bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_DEBUG);
+	bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_DEBUG);
 	
-	int status;
-	struct adsb_params p;
-	struct adsb_args rx_args;
-	struct bladerf *dev;
 	/* We must be sure to only make control calls
 	* (e.g., bladerf_enable_module()) from a single context. This is done
 	* by locking access to dev in such cases.
@@ -782,42 +600,123 @@ int modesInitBLADERF(void) {
 		return 0;
 	}
 	
-	p.frequency = DEFAULT_FREQUENCY;
-    p.samplerate = DEFAULT_SAMPLERATE;
-    p.rx_count = 0; // 0 is infinte samples
-    p.block_size = 32768; // block_size is number of samples.
-    p.device_str = NULL;
-    p.stream_buffer_size = p.block_size*2*2; // block_size number of samples * 2 bytes per sample * 2 (for both I and Q)
-    p.stream_buffer_count = 32;
-    p.num_xfers = 16;
-    p.timeout_ms = SYNC_TIMEOUT_MS;
-    p.gain = 30;
-    p.bandwidth = 3 * 1000000;
-    p.loopback = BLADERF_LB_NONE;
-    p.fpga_image = "hosted_calibrate.rbf";
-    p.fx3_image = "bladeRF_fw.img";
-	dev = initialize_device(&p);
-	if (dev == NULL) {
+	Modes.frequency = DEFAULT_FREQUENCY;
+    Modes.samplerate = DEFAULT_SAMPLERATE;
+    Modes.rx_count = 0; // 0 is infinte samples
+    Modes.block_size = 32768; // block_size is number of samples.
+    Modes.device_str = NULL;
+    Modes.stream_buffer_size = Modes.block_size*2*2; // block_size number of samples * 2 bytes per sample * 2 (for both I and Q)
+    Modes.stream_buffer_count = 32;
+    Modes.num_xfers = 16;
+    Modes.timeout_ms = SYNC_TIMEOUT_MS;
+    Modes.gain = 30;
+    Modes.bandwidth = 3 * 1000000;
+    Modes.loopback = BLADERF_LB_NONE;
+    Modes.fpga_image = "hosted_calibrate.rbf";
+    Modes.fx3_image = "bladeRF_fw.img";
+
+	int status = bladerf_open(&Modes.bladerf_dev, Modes.device_str);
+	if (status != 0) {
+		printf("Failed to open device: %s\n", bladerf_strerror(status));
 		return 0;
 	}
+
+#if 0
+	fpga_loaded = bladerf_is_fpga_configured(dev);
+	if (fpga_loaded < 0) {
+		printf("Failed to check FPGA state: %s\n",bladerf_strerror(fpga_loaded));
+		status = -1;
+		goto initialize_device_out;
+	} else if (fpga_loaded == 0) {
+		printf("Loading fpga...\n");
+        status = bladerf_load_fpga(dev, p->fpga_image);
+        if (status) {
+			fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
+			goto initialize_device_out;
+        } else {
+                printf("Done loading image %s.\n", p->fpga_image);
+        }
+	}
+#else
+	printf("Loading fpga...\n");
+        status = bladerf_load_fpga(Modes.bladerf_dev, Modes.fpga_image);
+        if (status) {
+			fprintf(stderr, "Error: failed to load FPGA: %s\n", bladerf_strerror(status));
+			goto initialize_device_out;
+        } else {
+                printf("Done loading image %s.\n", Modes.fpga_image);
+        }
+#endif
+
+	const char *m_str = "RX";
+	unsigned int samplerate_actual;
+	unsigned int frequency_actual;
+	unsigned int bw_actual;
+	
+	status = bladerf_set_sample_rate(Modes.bladerf_dev, BLADERF_MODULE_RX, Modes.samplerate, &samplerate_actual);
+	if (status != 0) {
+		printf("Failed to set %s samplerate: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+	
+	status = bladerf_set_frequency(Modes.bladerf_dev, BLADERF_MODULE_RX, Modes.frequency);
+	if (status != 0) {
+		printf("Failed to set %s frequency: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+
+	status = bladerf_get_frequency(Modes.bladerf_dev, BLADERF_MODULE_RX, &frequency_actual);
+	if (status != 0) {
+		printf("Failed to read back %s frequency: %s\n", m_str, bladerf_strerror(status));
+		return status;
+	}
+
+    status = bladerf_set_lna_gain(Modes.bladerf_dev, BLADERF_LNA_GAIN_MAX);
+    status = bladerf_set_lpf_mode(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_LPF_NORMAL);
+    status = bladerf_set_bandwidth(Modes.bladerf_dev, BLADERF_MODULE_RX, Modes.bandwidth, &bw_actual);
+    bladerf_set_txvga1(Modes.bladerf_dev, -35);
+    bladerf_set_txvga2(Modes.bladerf_dev, 0);
+    bladerf_set_rxvga1(Modes.bladerf_dev, Modes.gain);
+    bladerf_set_rxvga2(Modes.bladerf_dev, Modes.gain); // It turns out that we get more messages with this set high
+    printf("%s Frequency = %u, %s Samplerate = %u actual bw=%u\n", m_str, frequency_actual, m_str, samplerate_actual, bw_actual);
+
+	if (status != 0) {
+		printf("Failed to init RX module: %s\n",bladerf_strerror(status));
+        goto initialize_device_out;
+    }
+        
+	status = bladerf_set_loopback(Modes.bladerf_dev, Modes.loopback);
+	if (status != 0) {
+		printf("Failed to set loopback mode: %s\n",
+		bladerf_strerror(status));
+	} else {
+		printf("Set loopback to %d\n", Modes.loopback);
+	}
+
+	initialize_device_out:
+	if (status != 0) {
+		bladerf_close(Modes.bladerf_dev);
+		return 0;
+	}
+	return 1;	
 	
 	//LMS receiver calibration
-	//status = cal_lms_adsb(dev, argc, argv);
+	//status = cal_lms_adsb(Modes.bladerfdev, argc, argv);
 		
-	rx_args.dev = dev;
-	rx_args.dev_lock = &dev_lock;
-	rx_args.p = &p;
-	rx_args.status = 0;
-	rx_args.quit = false;
-	printf("Starting RX task\n");
-	}
+	//rx_args.dev = dev;
+	//rx_args.dev_lock = &dev_lock;
+	//rx_args.p = &p;
+	//rx_args.status = 0;
+	//rx_args.quit = false;
+	//printf("Starting RX task\n");
+	
 
 	printf("Running...\n");
 	
-	pthread_join(rx_args.thread, NULL);
-    printf("Joined  RX task\n");
+	//pthread_join(rx_args.thread, NULL);
+    //printf("Joined  RX task\n");
 	
-	bladerf_close(dev);
+	//bladerf_close(dev);
 	return 0;
 	 
 };

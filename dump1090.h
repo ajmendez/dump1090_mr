@@ -59,6 +59,7 @@
     #include <sys/ioctl.h>
     #include "rtl-sdr.h"
     #include "anet.h"
+	#include "libbladeRF.h"
 #else
     #include "winstubs.h" //Put everything Windows specific in here
     #include "rtl-sdr.h"
@@ -273,6 +274,41 @@ struct {                             // Internal state
     rtlsdr_dev_t *dev;
     int           freq;
     int           ppm_error;
+
+	// bladeRF
+    void                **buffers;      /* Transmit buffers */
+    size_t              num_buffers;    /* Number of buffers */
+    size_t              samples_per_buffer; /* Number of samples per buffer */
+    unsigned int        idx;            /* The next one that needs to go out */
+    bladerf_module      module;         /* Direction */
+    ssize_t             samples_left;   /* Number of samples left */
+
+    struct bladerf *bladerf_dev;
+    pthread_mutex_t *dev_lock;
+
+    struct adsb_params *p;
+    pthread_t thread;
+    int status;
+    bool quit;
+
+    const char      *device_str;
+    unsigned int    samplerate;
+    unsigned int    frequency;
+    bladerf_loopback loopback;
+
+    const char      *fpga_image;
+    const char      *fx3_image;
+
+    unsigned int    tx_repetitions;
+    uint64_t        rx_count;
+    unsigned int    block_size;
+
+    unsigned int    num_xfers;
+    unsigned int    stream_buffer_count;
+    unsigned int    stream_buffer_size;    /* Units of samples */
+    unsigned int    timeout_ms;
+    unsigned int    bladerf_gain;
+    unsigned int    bandwidth;
 
     // Networking
     char           aneterr[ANET_ERR_LEN];
