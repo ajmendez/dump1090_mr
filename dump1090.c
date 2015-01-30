@@ -260,9 +260,8 @@ int modesInitRTLSDR(void) {
 // A Mutex is used to avoid races with the decoding thread.
 //
 void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
-
-    MODES_NOTUSED(ctx);
-
+    
+	MODES_NOTUSED(ctx);
     // Lock the data buffer variables before accessing them
     pthread_mutex_lock(&Modes.data_mutex);
 
@@ -411,29 +410,38 @@ void snipMode(int level) {
 #define DEFAULT_STREAM_TIMEOUT  10000
 #define SYNC_TIMEOUT_MS         10000
 
-static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
+static int cal_lms_adsb(struct bladerf *dev)
 {
 	struct bladerf_lms_dc_cals lms_cals = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
     int status;
     int dcoff_i, dcoff_q;
     
     //Set calibration    
-    lms_cals.lpf_tuning = atoi(argv[1]);
-    lms_cals.tx_lpf_i	= atoi(argv[2]);
-    lms_cals.tx_lpf_q	= atoi(argv[3]);
-    lms_cals.rx_lpf_i	= atoi(argv[4]);
-    lms_cals.rx_lpf_q	= atoi(argv[5]);
-    lms_cals.dc_ref	= atoi(argv[6]);
-    lms_cals.rxvga2a_i	= atoi(argv[7]);
-    lms_cals.rxvga2a_q	= atoi(argv[8]);
-    lms_cals.rxvga2b_i	= atoi(argv[9]);
-    lms_cals.rxvga2b_q	= atoi(argv[10]);
+    //lms_cals.lpf_tuning = atoi(argv[1]);
+    //lms_cals.tx_lpf_i	= atoi(argv[2]);
+    //lms_cals.tx_lpf_q	= atoi(argv[3]);
+    //lms_cals.rx_lpf_i	= atoi(argv[4]);
+    //lms_cals.rx_lpf_q	= atoi(argv[5]);
+    //lms_cals.dc_ref	= atoi(argv[6]);
+    //lms_cals.rxvga2a_i	= atoi(argv[7]);
+    //lms_cals.rxvga2a_q	= atoi(argv[8]);
+    //lms_cals.rxvga2b_i	= atoi(argv[9]);
+    //lms_cals.rxvga2b_q	= atoi(argv[10]);
         
-    status = bladerf_lms_set_dc_cals(dev, &lms_cals);
-        if (status != 0) {
-        return -1;
-    }
-    
+    //status = bladerf_lms_set_dc_cals(dev, &lms_cals);
+    //    if (status != 0) {
+    //    return -1;
+    //}
+   
+	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_LPF_TUNING);
+	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_TX_LPF);
+	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RX_LPF);
+	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RXVGA2);
+    bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, 2);
+    bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, 27);
+
+	//status = calibrate_dc_rx(s, &dc_i, &dc_q, &avg_i, &avg_q);     
+
     //Print out calibration
     status = bladerf_lms_get_dc_cals(dev, &lms_cals);
     if (status != 0) {
@@ -453,10 +461,10 @@ static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
     
     
     //DC calibration
-    dcoff_i = atoi(argv[11]);
-    dcoff_q = atoi(argv[12]);
-    bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, dcoff_i);
-	bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, dcoff_q);
+    //dcoff_i = atoi(argv[11]);
+    //dcoff_q = atoi(argv[12]);
+    //bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, dcoff_i);
+	//bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, dcoff_q);
         
     return 0;
 	
@@ -464,8 +472,6 @@ static int cal_lms_adsb(struct bladerf *dev, int argc, char *argv[])
 
 int bladerfReadAsync(void) {
 	
-	pthread_mutex_lock(&Modes.data_mutex);
-
 	int status;
 	int16_t *samples; // buffer containing the 16 bit signed samples
 	unsigned char *samples_8bit; // buffer to contain the converted 8 bit unsigned samples
@@ -482,7 +488,7 @@ int bladerfReadAsync(void) {
 	return 0;
 	}
 
-	status = bladerf_sync_config(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, Modes.stream_buffer_count, Modes.stream_buffer_size, Modes.num_xfers, Modes.timeout_ms);
+	status = bladerf_sync_config(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_FORMAT_SC16_Q11, Modes.stream_buffer_count, Modes.block_size, Modes.num_xfers, Modes.timeout_ms);
 	if (status != 0) {
 		printf("Failed to initialize RX sync handle: %s\n", bladerf_strerror(status));
 	goto rx_task_out;
@@ -504,7 +510,6 @@ int bladerfReadAsync(void) {
         int16_t *pointer16; // used to iterate over 16 bit sample buffer
         unsigned char *pointer8;   // used to iterate over 8 bit sample buffer
 	while (Modes.exit == 0) {
-	printf("grabbing one buffer\n");
 		status = bladerf_sync_rx(Modes.bladerf_dev, samples, Modes.block_size, NULL, SYNC_TIMEOUT_MS);
 		if (status != 0) {
 			printf("RX failed: %s\n", bladerf_strerror(status));
@@ -513,10 +518,12 @@ int bladerfReadAsync(void) {
 			int16_t *pointer16 = samples;
 			unsigned char *pointer8 = samples_8bit;
 			for (k = 0; k < 2 * Modes.block_size; k++) {
-	                        *pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
+					*pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
 			}
 			//write(1, samples_8bit, 2*Modes.block_size);
-			puts(samples_8bit);
+			//puts(samples_8bit);
+			//printf("converted %u to 8bit\n", Modes.stream_buffer_size);
+			rtlsdrCallback(samples_8bit, Modes.stream_buffer_size/2, NULL );	
 		}
 	}	
 
@@ -550,11 +557,11 @@ int modesInitBLADERF(void) {
 	Modes.frequency = DEFAULT_FREQUENCY;
     Modes.samplerate = DEFAULT_SAMPLERATE;
     Modes.rx_count = 0; // 0 is infinte samples
-    Modes.block_size = 32768; // block_size is number of samples.
+    Modes.block_size = MODES_ASYNC_BUF_SAMPLES; // block_size is number of samples.
     Modes.device_str = NULL;
     Modes.stream_buffer_size = Modes.block_size*2*2; // block_size number of samples * 2 bytes per sample * 2 (for both I and Q)
-    Modes.stream_buffer_count = 32;
-    Modes.num_xfers = 16;
+    Modes.stream_buffer_count = MODES_ASYNC_BUF_NUMBER;
+    Modes.num_xfers = MODES_ASYNC_BUF_NUMBER-2;
     Modes.timeout_ms = SYNC_TIMEOUT_MS;
     Modes.gain = 30;
     Modes.bandwidth = 3 * 1000000;
@@ -647,8 +654,8 @@ int modesInitBLADERF(void) {
 	}
 	
 	//LMS receiver calibration
-	//status = cal_lms_adsb(Modes.bladerfdev, argc, argv);
-		
+	status = cal_lms_adsb(Modes.bladerf_dev);
+
 	printf("BladeRF Intialized\n");
 	
 	return 1;

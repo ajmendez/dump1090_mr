@@ -84,7 +84,7 @@
 #define MODES_DEFAULT_FREQ         1090000000
 #define MODES_DEFAULT_WIDTH        1000
 #define MODES_DEFAULT_HEIGHT       700
-#define MODES_ASYNC_BUF_NUMBER     16
+#define MODES_ASYNC_BUF_NUMBER     16 
 #define MODES_ASYNC_BUF_SIZE       (16*16384)                 // 256k
 #define MODES_ASYNC_BUF_SAMPLES    (MODES_ASYNC_BUF_SIZE / 2) // Each sample is 2 bytes
 #define MODES_AUTO_GAIN            -100                       // Use automatic gain
