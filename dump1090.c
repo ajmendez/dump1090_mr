@@ -91,22 +91,36 @@ void modesInitConfig(void) {
 //
 void modesInit(void) {
     int i, q;
+	signed int isigned ,qsigned;
 
     pthread_mutex_init(&Modes.pDF_mutex,NULL);
     pthread_mutex_init(&Modes.data_mutex,NULL);
     pthread_cond_init(&Modes.data_cond,NULL);
 
     // Allocate the various buffers used by Modes
-    if ( ((Modes.icao_cache = (uint32_t *) malloc(sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2)                  ) == NULL) ||
-         ((Modes.pFileData  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
-         ((Modes.magnitude  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE) ) == NULL) ||
-         ((Modes.maglut     = (uint16_t *) malloc(sizeof(uint16_t) * 256 * 256)                                 ) == NULL) ||
-         ((Modes.beastOut   = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
-         ((Modes.rawOut     = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ) 
-    {
-        fprintf(stderr, "Out of memory allocating data buffer.\n");
-        exit(1);
-    }
+	if (Modes.bladeRF == 1) {
+		 if ( ((Modes.icao_cache = (uint32_t *) malloc(sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2)				   ) == NULL) ||
+			((Modes.pFileData  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
+			((Modes.magnitude  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE) ) == NULL) ||
+			((Modes.beastOut   = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
+			((Modes.rawOut     = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
+			((Modes.blademaglut= (uint16_t *) malloc(sizeof(uint16_t) * 4096 * 4096)                               ) == NULL) )
+		{
+			fprintf(stderr, "Out of memory allocating data buffer.\n");
+			exit(1);
+		}
+    } else { 
+		if  ( ((Modes.icao_cache = (uint32_t *) malloc(sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2)				   ) == NULL) ||
+			((Modes.pFileData  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE)                                         ) == NULL) ||
+			((Modes.magnitude  = (uint16_t *) malloc(MODES_ASYNC_BUF_SIZE+MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE) ) == NULL) ||
+			((Modes.maglut     = (uint16_t *) malloc(sizeof(uint16_t) * 256 * 256)                                 ) == NULL) ||
+			((Modes.beastOut   = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) ||
+			((Modes.rawOut     = (char     *) malloc(MODES_RAWOUT_BUF_SIZE)                                        ) == NULL) )
+		{
+			fprintf(stderr, "Out of memory allocating data buffer.\n");
+			exit(1);
+		}
+	}
 
     // Clear the buffers that have just been allocated, just in-case
     memset(Modes.icao_cache, 0,   sizeof(uint32_t) * MODES_ICAO_CACHE_LEN * 2);
@@ -175,18 +189,29 @@ void modesInit(void) {
     // We also need to clip mag just incaes any rogue I/Q values somehow do have a magnitude greater than 255.
     //
 
-    for (i = 0; i <= 255; i++) {
-        for (q = 0; q <= 255; q++) {
-            int mag, mag_i, mag_q;
+	if (Modes.bladeRF == 1) {
+		int lutPos = 0;
+		for (i = 0; i < 4096; i++) {
+			int iSquared = i * i;
+            for (q = 0; q < 4096; q++) {
+                int qSquared = q * q;
+                Modes.blademaglut[lutPos++] = (uint16_t) ((sqrtf (iSquared + qSquared)));
+            }
+		}
+	} else {
+	    for (i = 0; i <= 255; i++) {
+		    for (q = 0; q <= 255; q++) {
+			    int mag, mag_i, mag_q;
 
-            mag_i = (i * 2) - 255;
-            mag_q = (q * 2) - 255;
+				mag_i = (i * 2) - 255;
+				mag_q = (q * 2) - 255;
 
-            mag = (int) round((sqrt((mag_i*mag_i)+(mag_q*mag_q)) * 258.433254) - 365.4798);
+				mag = (int) round((sqrt((mag_i*mag_i)+(mag_q*mag_q)) * 258.433254) - 365.4798);
 
-            Modes.maglut[(i*256)+q] = (uint16_t) ((mag < 65535) ? mag : 65535);
-        }
-    }
+				Modes.maglut[(i*256)+q] = (uint16_t) ((mag < 65535) ? mag : 65535);
+			}
+		}
+	}
 
     // Prepare error correction tables
     modesInitErrorInfo();
@@ -295,6 +320,51 @@ void rtlsdrCallback(unsigned char *buf, uint32_t len, void *ctx) {
 //
 //=========================================================================
 //
+// We use a thread reading data in background, while the main thread
+// handles decoding and visualization of data to the user.
+//
+// The reading thread calls the RTLSDR API to read data asynchronously, and
+// uses a callback to populate the data buffer.
+//
+// A Mutex is used to avoid races with the decoding thread.
+//
+void bladerfCallback(uint16_t *buf, uint32_t len, void *ctx) {
+
+    MODES_NOTUSED(ctx);
+    // Lock the data buffer variables before accessing them
+    pthread_mutex_lock(&Modes.data_mutex);
+
+    Modes.iDataIn &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase!!!
+
+    // Get the system time for this block
+    ftime(&Modes.stSystemTimeRTL[Modes.iDataIn]);
+
+    //if (len > MODES_ASYNC_BUF_SIZE) {len = MODES_ASYNC_BUF_SIZE;}
+
+    // Queue the new data
+    Modes.pData[Modes.iDataIn] = (uint16_t *) buf;
+    Modes.iDataIn    = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn + 1);
+    Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataIn - Modes.iDataOut);
+
+    if (Modes.iDataReady == 0) {
+      // Ooooops. We've just received the MODES_ASYNC_BUF_NUMBER'th outstanding buffer
+      // This means that RTLSDR is currently overwriting the MODES_ASYNC_BUF_NUMBER+1
+      // buffer, but we havent yet processed it, so we're going to lose it. There
+      // isn't much we can do to recover the lost data, but we can correct things to
+      // avoid any additional problems.
+      Modes.iDataOut   = (MODES_ASYNC_BUF_NUMBER-1) & (Modes.iDataOut+1);
+      Modes.iDataReady = (MODES_ASYNC_BUF_NUMBER-1);
+      Modes.iDataLost++;
+    }
+
+    // Signal to the other thread that new data is ready, and unlock
+    pthread_cond_signal(&Modes.data_cond);
+    pthread_mutex_unlock(&Modes.data_mutex);
+}
+
+//
+//=========================================================================
+//
 // This is used when --ifile is specified in order to read data from file
 // instead of using an RTLSDR device
 //
@@ -331,6 +401,7 @@ void readDataFromFile(void) {
         if (toread) {
             // Not enough data on file to fill the buffer? Pad with no signal.
             memset(p,127,toread);
+
         }
 
         Modes.iDataIn &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase!!!
@@ -433,12 +504,13 @@ static int cal_lms_adsb(struct bladerf *dev)
     //    return -1;
     //}
    
-	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_LPF_TUNING);
-	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_TX_LPF);
-	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RX_LPF);
-	status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RXVGA2);
-    bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, 2);
-    bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, 27);
+	//This will run the autocalibration
+	//status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_LPF_TUNING);
+	//status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_TX_LPF);
+	//status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RX_LPF);
+	//status = bladerf_calibrate_dc(Modes.bladerf_dev, BLADERF_DC_CAL_RXVGA2);
+    //bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, 254);
+    //bladerf_set_correction(Modes.bladerf_dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, 24);
 
 	//status = calibrate_dc_rx(s, &dc_i, &dc_q, &avg_i, &avg_q);     
 
@@ -463,8 +535,8 @@ static int cal_lms_adsb(struct bladerf *dev)
     //DC calibration
     //dcoff_i = atoi(argv[11]);
     //dcoff_q = atoi(argv[12]);
-    //bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, dcoff_i);
-	//bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, dcoff_q);
+    //bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_I, 254);
+	//bladerf_set_correction(dev, BLADERF_MODULE_RX, BLADERF_CORR_LMS_DCOFF_Q, 24);
         
     return 0;
 	
@@ -482,7 +554,7 @@ int bladerfReadAsync(void) {
 	int i;
 	
 	samples = (int16_t *)malloc(Modes.stream_buffer_size);
-	samples_8bit = (unsigned char *)malloc(Modes.stream_buffer_size/2);
+	//samples_8bit = (unsigned char *)malloc(Modes.stream_buffer_size/2);
 	if (samples == NULL) {
 		perror("malloc");
 	return 0;
@@ -515,15 +587,7 @@ int bladerfReadAsync(void) {
 			printf("RX failed: %s\n", bladerf_strerror(status));
 			done = true;
 		} else {
-			int16_t *pointer16 = samples;
-			unsigned char *pointer8 = samples_8bit;
-			for (k = 0; k < 2 * Modes.block_size; k++) {
-					*pointer8++ = (unsigned char) (*pointer16++ / 16 + 127); // convert 16 bit signed to 8 bit unsigned
-			}
-			//write(1, samples_8bit, 2*Modes.block_size);
-			//puts(samples_8bit);
-			//printf("converted %u to 8bit\n", Modes.stream_buffer_size);
-			rtlsdrCallback(samples_8bit, Modes.stream_buffer_size/2, NULL );	
+			bladerfCallback(samples, Modes.stream_buffer_size, NULL );	
 		}
 	}	
 
@@ -1137,8 +1201,12 @@ int main(int argc, char **argv) {
             Modes.iDataOut &= (MODES_ASYNC_BUF_NUMBER-1); // Just incase
 
             // Translate the next lot of I/Q samples into Modes.magnitude
-            computeMagnitudeVector(Modes.pData[Modes.iDataOut]);
-
+            if (Modes.bladeRF = '1' ) {
+				computeSignedMagnitudeVector(Modes.pData[Modes.iDataOut]);
+			} else {
+				computeMagnitudeVector(Modes.pData[Modes.iDataOut]);
+			}
+			
             Modes.stSystemTimeBlk = Modes.stSystemTimeRTL[Modes.iDataOut];
 
             // Update the input buffer pointer queue

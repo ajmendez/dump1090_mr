@@ -266,6 +266,7 @@ struct {                             // Internal state
     uint32_t       *icao_cache;      // Recently seen ICAO addresses cache
     uint16_t       *maglut;          // I/Q -> Magnitude lookup table
     int             exit;            // Exit from the main loop when true
+	uint16_t       *blademaglut;	 // I/Q -> 12 bit Magnitude lookup table
 
     // RTLSDR
     int           dev_index;
@@ -485,6 +486,7 @@ void decodeModesMessage (struct modesMessage *mm, unsigned char *msg);
 void displayModesMessage(struct modesMessage *mm);
 void useModesMessage    (struct modesMessage *mm, struct client *c);
 void computeMagnitudeVector(uint16_t *pData);
+void computeSignedMagnitudeVector(int16_t *pData);
 int  decodeCPR          (struct aircraft *a, int fflag, int surface);
 int  decodeCPRrelative  (struct aircraft *a, int fflag, int surface);
 void modesInitErrorInfo ();

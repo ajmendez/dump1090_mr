@@ -1435,10 +1435,39 @@ void computeMagnitudeVector(uint16_t *p) {
 
     // Compute the magnitudo vector. It's just SQRT(I^2 + Q^2), but
     // we rescale to the 0-255 range to exploit the full resolution.
-    for (j = 0; j < MODES_ASYNC_BUF_SAMPLES; j ++) {
-        *m++ = Modes.maglut[*p++];
+	for (j = 0; j < MODES_ASYNC_BUF_SAMPLES; j ++) {
+		*m++ = Modes.maglut[*p++];
+	}
+}
+
+//
+//=========================================================================
+//
+// Turn I/Q samples pointed by Modes.data into the magnitude vector
+// pointed by Modes.magnitude.
+//
+void computeSignedMagnitudeVector(int16_t *p) {
+
+    uint16_t *m = &Modes.magnitude[MODES_PREAMBLE_SAMPLES+MODES_LONG_MSG_SAMPLES];
+    int32_t j;
+	int i,q;
+
+    memcpy(Modes.magnitude,&Modes.magnitude[MODES_ASYNC_BUF_SAMPLES], MODES_PREAMBLE_SIZE+MODES_LONG_MSG_SIZE);
+
+    // Compute the magnitudo vector. It's just SQRT(I^2 + Q^2), but
+    // we rescale to the 0-255 range to exploit the full resolution.
+	for (j = 0; j < MODES_ASYNC_BUF_SAMPLES; j ++) {
+		//printf("%i ",*p);
+		//printf("%i \n",Modes.blademaglut[*p]);
+		//*m++ = Modes.blademaglut[*p++];
+		i = *p++;
+		q = *p++;
+		*m = (uint16_t) ((sqrtf (i*i + q*q))*16);
+		//if (*m > 1000) printf("%i %i %i \n ", i , q, *m);	
+		*m++;
     }
 }
+
 //
 //=========================================================================
 //
